@@ -145,7 +145,15 @@ jobs:
         echo $! | sudo tee "$MON/dmesg.pid" > /dev/null
     - name: Tests
       working-directory: ${{ env.CPYTHON_BUILDDIR }}
+      env:
+        TEST_OPTS: ${{ inputs.test-opts }}
+        CPYTHON_FT_VERBOSE_LOG: ${{ runner.temp }}/ft-verbose.log
       run: |
+        # Pre-create the test_free_threading side log so tail -F can attach
+        # immediately. The worker writes per-method events here (see
+        # Lib/test/test_free_threading/__init__.py).
+        : > "$CPYTHON_FT_VERBOSE_LOG"
+
         # Background sampler whose output streams into THIS step's live log,
         # so it survives a runner shutdown / OOM kill (post-steps don't).
         (
@@ -170,10 +178,15 @@ jobs:
           done
         ) &
         MON=$!
-        trap 'kill "$MON" 2>/dev/null || true' EXIT
+
+        # Tail the test_free_threading verbose log into this step's stdout
+        # with [FT] prefix. Streams to GHA in real time, so it survives a
+        # runner shutdown the same way the sampler does.
+        tail -F "$CPYTHON_FT_VERBOSE_LOG" 2>/dev/null | sed -u 's/^/[FT] /' &
+        FT_TAIL=$!
+
+        trap 'kill "$MON" "$FT_TAIL" 2>/dev/null || true' EXIT
         xvfb-run make ci EXTRATESTOPTS="${TEST_OPTS}"
-      env:
-        TEST_OPTS: ${{ inputs.test-opts }}
     - name: Stop resource monitor and collect logs
       if: always()
       run: |
