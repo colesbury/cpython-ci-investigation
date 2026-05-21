@@ -145,7 +145,28 @@ jobs:
         echo $! | sudo tee "$MON/dmesg.pid" > /dev/null
     - name: Tests
       working-directory: ${{ env.CPYTHON_BUILDDIR }}
-      run: xvfb-run make ci EXTRATESTOPTS="${TEST_OPTS}"
+      run: |
+        # Background sampler whose output streams into THIS step's live log,
+        # so it survives a runner shutdown / OOM kill (post-steps don't).
+        (
+          while :; do
+            printf '\n### MON %s ###\n' "$(date -u +%FT%TZ)"
+            free -m | sed -n '1,3p'
+            echo "load: $(cat /proc/loadavg)"
+            [ -r /proc/pressure/memory ] && \
+              echo "psi/mem: $(grep some /proc/pressure/memory)"
+            [ -r /proc/pressure/cpu ] && \
+              echo "psi/cpu: $(grep some /proc/pressure/cpu)"
+            [ -r /proc/pressure/io ] && \
+              echo "psi/io:  $(grep some /proc/pressure/io)"
+            ps --no-headers -eo rss,pid,comm --sort=-rss | head -8 \
+              | awk '{printf "  %8s KB  pid=%-6s  %s\n",$1,$2,$3}'
+            sleep 5
+          done
+        ) &
+        MON=$!
+        trap 'kill "$MON" 2>/dev/null || true' EXIT
+        xvfb-run make ci EXTRATESTOPTS="${TEST_OPTS}"
       env:
         TEST_OPTS: ${{ inputs.test-opts }}
     - name: Stop resource monitor and collect logs
