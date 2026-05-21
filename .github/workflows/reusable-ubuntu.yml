@@ -161,6 +161,11 @@ jobs:
               echo "psi/io:  $(grep some /proc/pressure/io)"
             ps --no-headers -eo rss,pid,comm --sort=-rss | head -8 \
               | awk '{printf "  %8s KB  pid=%-6s  %s\n",$1,$2,$3}'
+            ps --no-headers -eo pid --sort=-rss | head -3 | while read p; do
+              cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | cut -c1-240)
+              [ -z "$cmd" ] && cmd="(gone)"
+              printf "  cmd[pid=%s]: %s\n" "$p" "$cmd"
+            done
             sleep 5
           done
         ) &
