@@ -46,6 +46,8 @@ jobs:
       run: echo "::add-matcher::.github/problem-matchers/gcc.json"
     - name: Install dependencies
       run: sudo ./.github/workflows/posix-deps-apt.sh
+    - name: Install monitoring tools
+      run: sudo apt-get install -y sysstat
     - name: Install Clang and BOLT
       if: ${{ fromJSON(inputs.bolt-optimizations) }}
       run: |
@@ -114,8 +116,68 @@ jobs:
     - name: Remount sources writable for tests
       # some tests write to srcdir, lack of pyc files slows down testing
       run: sudo mount "$CPYTHON_RO_SRCDIR" -oremount,rw
+    - name: Start resource monitor
+      run: |
+        MON="$RUNNER_TEMP/monitoring"
+        mkdir -p "$MON"
+
+        # sar: 5s interval, all metrics, binary log we'll convert later.
+        nohup sar -o "$MON/sar.bin" -A 5 0 \
+          >"$MON/sar.stdout" 2>"$MON/sar.stderr" &
+        echo $! > "$MON/sar.pid"
+
+        # Human-readable snapshot every 15s: free, loadavg, meminfo summary.
+        nohup bash -c '
+          while :; do
+            printf "=== %s ===\n" "$(date -u +%FT%TZ)"
+            free -m
+            cat /proc/loadavg
+            grep -E "^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Swap)" /proc/meminfo
+            echo
+            sleep 15
+          done
+        ' > "$MON/snapshots.log" 2>&1 &
+        echo $! > "$MON/snapshots.pid"
+
+        # Tap dmesg for kernel events (OOM killer, etc.).
+        sudo nohup dmesg --follow-new --time-format iso \
+          > "$MON/dmesg.log" 2>&1 &
+        echo $! | sudo tee "$MON/dmesg.pid" > /dev/null
     - name: Tests
       working-directory: ${{ env.CPYTHON_BUILDDIR }}
       run: xvfb-run make ci EXTRATESTOPTS="${TEST_OPTS}"
       env:
         TEST_OPTS: ${{ inputs.test-opts }}
+    - name: Stop resource monitor and collect logs
+      if: always()
+      run: |
+        MON="$RUNNER_TEMP/monitoring"
+        # Stop samplers (ignore errors if they already exited).
+        [ -f "$MON/sar.pid" ]       && kill "$(cat "$MON/sar.pid")"       || true
+        [ -f "$MON/snapshots.pid" ] && kill "$(cat "$MON/snapshots.pid")" || true
+        [ -f "$MON/dmesg.pid" ]     && sudo kill "$(cat "$MON/dmesg.pid")" || true
+
+        # Convert sar binary to text + CSV for off-runner analysis.
+        sar -A -f "$MON/sar.bin" > "$MON/sar.txt" 2>&1 || true
+        sadf -d "$MON/sar.bin" -- -A > "$MON/sar.csv" 2>&1 || true
+
+        # Full final dmesg (in case the live tap missed wraparound) and kernel journal.
+        sudo dmesg --ctime > "$MON/dmesg.final.txt" 2>&1 || true
+        sudo journalctl -k --no-pager > "$MON/journal.kernel.txt" 2>&1 || true
+
+        # Final state snapshot.
+        {
+          printf "=== final %s ===\n" "$(date -u +%FT%TZ)"
+          free -m; echo
+          df -h;  echo
+          uptime
+        } > "$MON/final-state.txt"
+
+        ls -la "$MON"
+    - name: Upload monitoring artifact
+      if: always()
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      with:
+        name: monitoring-${{ inputs.os }}-ft${{ inputs.free-threading }}
+        path: ${{ runner.temp }}/monitoring/
+        if-no-files-found: warn
