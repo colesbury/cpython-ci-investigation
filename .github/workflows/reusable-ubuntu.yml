@@ -166,7 +166,10 @@ jobs:
         ) &
         MON=$!
         trap 'kill "$MON" 2>/dev/null || true' EXIT
-        xvfb-run make ci EXTRATESTOPTS="${TEST_OPTS}"
+        # Run test_free_threading first with verbose output (suspected source
+        # of memory pressure); then run the rest of the suite.
+        xvfb-run make ci EXTRATESTOPTS="${TEST_OPTS} -v test_free_threading"
+        xvfb-run make ci EXTRATESTOPTS="${TEST_OPTS} -x test_free_threading"
       env:
         TEST_OPTS: ${{ inputs.test-opts }}
     - name: Stop resource monitor and collect logs
